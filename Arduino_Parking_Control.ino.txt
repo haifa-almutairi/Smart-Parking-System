@@ -1,0 +1,333 @@
+#include <SPI.h>
+#include <MFRC522.h>
+#include <Servo.h>
+
+#define SS_PIN 10
+#define RST_PIN 9
+#define SERVO_PIN 3
+
+MFRC522 rfid(SS_PIN, RST_PIN);
+Servo gateServo;
+
+const int dir_ro = A0;
+const int st_ro = A1;
+const int li_ro = 2;
+
+const int dir_up = A2;
+const int st_up = A3;
+const int li_up = 5;
+
+const int IN1 = 4;
+const int IN2 = 6;
+const int IN3 = A4;
+const int IN4 = A5;
+
+const int alarm = 8;
+const int nar = 7;
+const int ok = 0;
+
+float stepsPerMM = 256;
+
+int x = 0;
+int y = 0;
+int s = 0;
+
+int dor1 = 345;
+int dor2 = 575;
+int up = 45;
+
+int slotSteps[8] = {10, 375, 397, 789, 10, 375, 397, 789};
+int floorSteps[8] = {345, 345, 345, 345, 575, 575, 575, 575};
+int rotateDirection[8] = {1, 0, 1, 1, 1, 0, 0, 1};
+int returnDirection[8] = {0, 1, 0, 0, 0, 1, 1, 0};
+
+int st = 10;
+String parkedCards[8];
+
+String allowedCards[8] = {
+  "5979D1E",
+  "74439D1E",
+  "43AF9C1E",
+  "CC559C1E",
+  "AE289C1E",
+  "354C9C1E",
+  "DD189D1E",
+  "4D399C1E"
+};
+
+int stepSequence[8][4] = {
+  {1, 0, 0, 0},
+  {1, 1, 0, 0},
+  {0, 1, 0, 0},
+  {0, 1, 1, 0},
+  {0, 0, 1, 0},
+  {0, 0, 1, 1},
+  {0, 0, 0, 1},
+  {1, 0, 0, 1}
+};
+
+String getCardID() {
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) {
+    return "0";
+  }
+
+  String uid = "";
+  for (byte i = 0; i < rfid.uid.size; i++) {
+    uid += String(rfid.uid.uidByte[i], HEX);
+  }
+
+  uid.toUpperCase();
+  rfid.PICC_HaltA();
+  return uid;
+}
+
+bool isAllowed(String cardID) {
+  for (int i = 0; i < 8; i++) {
+    if (cardID == allowedCards[i]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool isAlreadyParked(String cardID) {
+  for (int i = 0; i < 8; i++) {
+    if (cardID == parkedCards[i]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+int getParkedSlot(String cardID) {
+  for (int i = 0; i < 8; i++) {
+    if (cardID == parkedCards[i]) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+void checkFireAlarm() {
+  if (digitalRead(nar) == ok) {
+    tone(alarm, 200, 10000);
+  }
+}
+
+void stepMotor(int stepIndex) {
+  digitalWrite(IN1, stepSequence[stepIndex][0]);
+  digitalWrite(IN2, stepSequence[stepIndex][1]);
+  digitalWrite(IN3, stepSequence[stepIndex][2]);
+  digitalWrite(IN4, stepSequence[stepIndex][3]);
+}
+
+void moveMM(float distanceMM, bool direction) {
+  long stepsToMove = distanceMM * stepsPerMM;
+  int index = 0;
+
+  for (long i = 0; i < stepsToMove; i++) {
+    if (direction) {
+      index = (index + 1) % 8;
+    } else {
+      index = (index + 7) % 8;
+    }
+
+    stepMotor(index);
+    delay(1);
+  }
+}
+
+void moveAxis(int dirPin, int stepPin, int direction, int steps, int delayTime) {
+  for (int i = 0; i <= steps; i++) {
+    digitalWrite(dirPin, direction);
+    digitalWrite(stepPin, 1);
+    delayMicroseconds(delayTime);
+    digitalWrite(stepPin, 0);
+    delayMicroseconds(delayTime);
+  }
+}
+
+void openGate() {
+  gateServo.write(90);
+  delay(5000);
+  gateServo.write(0);
+}
+
+void pickupCar() {
+  moveMM(st, false);
+  moveAxis(dir_up, st_up, 1, up, 10000);
+  delay(2000);
+  moveMM(st, true);
+  delay(2000);
+}
+
+void releaseCar() {
+  moveMM(st, false);
+  delay(2000);
+  moveAxis(dir_up, st_up, 0, up, 10000);
+  delay(2000);
+  moveMM(st, true);
+  delay(2000);
+}
+
+void parkCar(String cardID, int slotIndex) {
+  checkFireAlarm();
+  tone(alarm, 500, 2000);
+  delay(2000);
+
+  parkedCards[slotIndex] = cardID;
+
+  openGate();
+  delay(5000);
+
+  pickupCar();
+
+  moveAxis(dir_up, st_up, 1, floorSteps[slotIndex], 7000);
+  delay(2000);
+
+  moveAxis(dir_ro, st_ro, rotateDirection[slotIndex], slotSteps[slotIndex], 7000);
+  delay(2000);
+
+  releaseCar();
+
+  moveAxis(dir_ro, st_ro, returnDirection[slotIndex], slotSteps[slotIndex], 7000);
+  delay(2000);
+
+  moveAxis(dir_up, st_up, 0, floorSteps[slotIndex], 7000);
+  delay(2000);
+}
+
+void retrieveCar(String cardID, int slotIndex) {
+  checkFireAlarm();
+
+  tone(alarm, 500, 1000);
+  delay(1000);
+  tone(alarm, 800, 1000);
+  delay(1000);
+  tone(alarm, 500, 1000);
+  delay(1000);
+
+  parkedCards[slotIndex] = "1";
+
+  moveAxis(dir_up, st_up, 1, floorSteps[slotIndex], 7000);
+  delay(2000);
+
+  moveAxis(dir_ro, st_ro, rotateDirection[slotIndex], slotSteps[slotIndex], 7000);
+  delay(2000);
+
+  pickupCar();
+
+  moveAxis(dir_ro, st_ro, returnDirection[slotIndex], slotSteps[slotIndex], 7000);
+  delay(2000);
+
+  moveAxis(dir_up, st_up, 0, floorSteps[slotIndex], 7000);
+  delay(2000);
+
+  releaseCar();
+
+  openGate();
+}
+
+void calibrateSystem() {
+  while (digitalRead(li_ro) == 1 && x == 0) {
+    digitalWrite(dir_ro, 1);
+    digitalWrite(st_ro, 1);
+    delayMicroseconds(7000);
+    digitalWrite(st_ro, 0);
+    delayMicroseconds(7000);
+
+    if (digitalRead(li_ro) == 0) {
+      x = 1;
+      s = 1;
+    }
+  }
+
+  delay(100);
+
+  if (s == 1) {
+    moveAxis(dir_ro, st_ro, 0, 30, 7000);
+  }
+
+  delay(100);
+
+  while (digitalRead(li_up) == 1 && y == 0) {
+    digitalWrite(dir_up, 1);
+    digitalWrite(st_up, 1);
+    delayMicroseconds(7000);
+    digitalWrite(st_up, 0);
+    delayMicroseconds(7000);
+
+    if (digitalRead(li_up) == 0) {
+      y = 1;
+      s = 2;
+    }
+  }
+
+  delay(100);
+
+  if (s == 2) {
+    moveAxis(dir_up, st_up, 0, 485, 7000);
+    s = 3;
+  }
+
+  delay(1000);
+}
+
+void setup() {
+  Serial.begin(9600);
+  SPI.begin();
+  rfid.PCD_Init();
+
+  gateServo.attach(SERVO_PIN);
+  gateServo.write(0);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(dir_ro, OUTPUT);
+  pinMode(st_ro, OUTPUT);
+  pinMode(li_ro, INPUT_PULLUP);
+
+  pinMode(dir_up, OUTPUT);
+  pinMode(st_up, OUTPUT);
+  pinMode(li_up, INPUT_PULLUP);
+
+  pinMode(nar, INPUT);
+  pinMode(alarm, OUTPUT);
+
+  Serial.println("System Ready...");
+  delay(5000);
+}
+
+void loop() {
+  checkFireAlarm();
+
+  if (s < 3) {
+    calibrateSystem();
+  }
+
+  String card = getCardID();
+  Serial.println(card);
+
+  if (card == "0") {
+    return;
+  }
+
+  int parkedSlot = getParkedSlot(card);
+
+  if (parkedSlot != -1) {
+    retrieveCar(card, parkedSlot);
+    return;
+  }
+
+  if (isAllowed(card) && !isAlreadyParked(card)) {
+    for (int i = 0; i < 8; i++) {
+      if (parkedCards[i] == "" || parkedCards[i] == "1") {
+        parkCar(card, i);
+        return;
+      }
+    }
+  }
+}

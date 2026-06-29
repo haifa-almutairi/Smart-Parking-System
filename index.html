@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Smart Parking System</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<style>
+body{
+  margin:0;
+  font-family:Arial, sans-serif;
+  background:linear-gradient(135deg,#0f2027,#203a43,#2c5364);
+}
+header{
+  color:white;
+  text-align:center;
+  padding:30px;
+}
+.card{
+  background:white;
+  max-width:900px;
+  margin:20px auto;
+  padding:25px;
+  border-radius:18px;
+  box-shadow:0 10px 30px rgba(0,0,0,.25);
+  text-align:center;
+}
+input,select,button{
+  width:90%;
+  padding:12px;
+  margin:8px;
+  border-radius:10px;
+  border:1px solid #ccc;
+}
+button{
+  background:#007bff;
+  color:white;
+  border:0;
+  cursor:pointer;
+  font-weight:bold;
+}
+button:hover{background:#0056b3}
+.grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+  gap:15px;
+}
+.slot{
+  padding:18px;
+  border-radius:15px;
+}
+.available{background:#d4f8d4}
+.occupied{background:#ffd0d0}
+.booked{background:#fff1b8}
+.hidden{display:none}
+.historyItem{
+  background:#f7f7f7;
+  padding:12px;
+  margin:10px;
+  border-radius:10px;
+  text-align:left;
+}
+.nav button{width:auto}
+</style>
+</head>
+
+<body>
+
+<header>
+<h1>Smart Parking System</h1>
+<p>Real-time booking system using ESP32 and Firebase</p>
+</header>
+
+<div class="card" id="loginBox">
+<h2>Login / Sign Up</h2>
+<input id="email" placeholder="Email">
+<input id="password" type="password" placeholder="Password">
+<button onclick="signup()">Sign Up</button>
+<button onclick="login()">Login</button>
+<button onclick="adminLogin()">Admin Panel</button>
+</div>
+
+<div class="card hidden" id="bookingBox">
+<div class="nav">
+<button onclick="showHistory()">Booking History</button>
+<button onclick="showBot()">Chatbot</button>
+<button onclick="logout()">Logout</button>
+</div>
+<h2>Parking Slots</h2>
+<div class="grid" id="slots"></div>
+</div>
+
+<div class="card hidden" id="paymentBox">
+<h2>Payment</h2>
+<p id="paymentText"></p>
+<select id="timeSlot"></select>
+<input placeholder="Card Number">
+<input placeholder="Expiry Date">
+<input placeholder="CVV">
+<button onclick="confirmPayment()">Pay 3 SAR</button>
+<button onclick="backToBooking()">Cancel</button>
+</div>
+
+<div class="card hidden" id="historyBox">
+<h2>Booking History</h2>
+<div id="history"></div>
+<button onclick="backToBooking()">Back</button>
+</div>
+
+<div class="card hidden" id="botBox">
+<h2>Smart Parking Bot</h2>
+<p><b>Bot:</b> Hello! Booking is for 1 hour only and costs 3 SAR.</p>
+<button onclick="alert('Choose an available slot, select a 1-hour time, then pay 3 SAR.')">How to book?</button>
+<button onclick="alert('Green = Available, Red = Occupied, Yellow = Booked.')">Slot colors?</button>
+<button onclick="backToBooking()">Back</button>
+</div>
+
+<div class="card hidden" id="adminBox">
+<h2>Admin Panel</h2>
+<div id="adminData"></div>
+<button onclick="logout()">Logout</button>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
+<script>
+const firebaseConfig = {
+  databaseURL: "https://parking-systemjh-default-rtdb.firebaseio.com/"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+let currentUser = "";
+let selectedSlot = "";
+
+function signup(){
+  let email = document.getElementById("email").value.trim().toLowerCase();
+  let pass = document.getElementById("password").value;
+
+  if(email === "" || pass === ""){
+    alert("Enter email and password");
+    return;
+  }
+
+  localStorage.setItem(email, pass);
+  alert("Sign up successful");
+}
+
+function login(){
+  let email = document.getElementById("email").value.trim().toLowerCase();
+  let pass = document.getElementById("password").value;
+
+  if(localStorage.getItem(email) === pass){
+    currentUser = email;
+    loginBox.classList.add("hidden");
+    bookingBox.classList.remove("hidden");
+    loadSlots();
+  } else {
+    alert("Wrong email or password");
+  }
+}
+
+function adminLogin(){
+  let pass = prompt("Enter admin password:");
+  if(pass === "admin123"){
+    loginBox.classList.add("hidden");
+    adminBox.classList.remove("hidden");
+    loadAdmin();
+  } else {
+    alert("Wrong admin password");
+  }
+}
+
+function checkExpiredBookings(){
+  db.ref("bookings").once("value", snap=>{
+    let bookings = snap.val();
+
+    if(bookings){
+      for(let id in bookings){
+        let b = bookings[id];
+
+        if(b.endMs && Date.now() > b.endMs && b.status === "Paid"){
+          db.ref("slots/" + b.slot).set("Available");
+          db.ref("bookings/" + id + "/status").set("Completed");
+        }
+      }
+    }
+  });
+}
+
+function loadSlots(){
+  checkExpiredBookings();
+
+  db.ref("slots").on("value", snap=>{
+    let data = snap.val() || {};
+    let html = "";
+
+    for(let i=1; i<=8; i++){
+      let slot = "slot" + i;
+      let status = data[slot] || "Available";
+
+      let css = status === "Available" ? "available" :
+                status === "Booked" ? "booked" : "occupied";
+
+      html += `
+      <div class="slot ${css}">
+        <h3>Slot ${i}</h3>
+        <p>${status}</p>
+        ${status === "Available" ? `<button onclick="bookSlot('${slot}')">Book</button>` : ""}
+      </div>`;
+    }
+
+    document.getElementById("slots").innerHTML = html;
+  });
+}
+
+function bookSlot(slot){
+  selectedSlot = slot;
+  bookingBox.classList.add("hidden");
+  paymentBox.classList.remove("hidden");
+  paymentText.innerText = "Booking " + slot + " for 1 hour. Price: 3 SAR";
+  loadTimeSlots();
+}
+
+function loadTimeSlots(){
+  let select = document.getElementById("timeSlot");
+  select.innerHTML = "";
+
+  let now = new Date();
+
+  for(let i=0; i<8; i++){
+    let start = new Date(now.getTime() + i * 60 * 60 * 1000);
+    let end = new Date(start.getTime() + 60 * 60 * 1000);
+
+    let text =
+      start.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) +
+      " - " +
+      end.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+
+    select.innerHTML += `<option value="${start.getTime()}">${text}</option>`;
+  }
+}
+
+function confirmPayment(){
+  let startMs = Number(document.getElementById("timeSlot").value);
+  let endMs = startMs + 60 * 60 * 1000;
+  let bookingId = Date.now();
+
+  db.ref("bookings/" + bookingId).set({
+    user: currentUser,
+    slot: selectedSlot,
+    status: "Paid",
+    price: "3 SAR",
+    startMs: startMs,
+    endMs: endMs,
+    startTime: new Date(startMs).toLocaleString(),
+    endTime: new Date(endMs).toLocaleString()
+  }).then(()=>{
+    db.ref("slots/" + selectedSlot).set("Booked");
+    alert("Payment successful! Slot booked for 1 hour.");
+    paymentBox.classList.add("hidden");
+    bookingBox.classList.remove("hidden");
+  });
+}
+
+function showHistory(){
+  bookingBox.classList.add("hidden");
+  historyBox.classList.remove("hidden");
+
+  db.ref("bookings").once("value", snap=>{
+    let data = snap.val();
+    let html = "";
+
+    if(data){
+      for(let id in data){
+        let b = data[id];
+
+        if(b.user && b.user.toLowerCase() === currentUser.toLowerCase()){
+          html += `
+          <div class="historyItem">
+          <b>Slot:</b> ${b.slot}<br>
+          <b>Price:</b> ${b.price}<br>
+          <b>From:</b> ${b.startTime}<br>
+          <b>To:</b> ${b.endTime}<br>
+          <b>Status:</b> ${b.status}
+          </div>`;
+        }
+      }
+    }
+
+    document.getElementById("history").innerHTML = html || "No bookings yet.";
+  });
+}
+
+function loadAdmin(){
+  db.ref("bookings").on("value", snap=>{
+    let data = snap.val();
+    let html = "";
+
+    if(data){
+      for(let id in data){
+        let b = data[id];
+
+        html += `
+        <div class="historyItem">
+        <b>User:</b> ${b.user}<br>
+        <b>Slot:</b> ${b.slot}<br>
+        <b>Price:</b> ${b.price}<br>
+        <b>From:</b> ${b.startTime}<br>
+        <b>To:</b> ${b.endTime}<br>
+        <b>Status:</b> ${b.status}
+        </div>`;
+      }
+    }
+
+    document.getElementById("adminData").innerHTML = html || "No bookings yet.";
+  });
+}
+
+function showBot(){
+  bookingBox.classList.add("hidden");
+  botBox.classList.remove("hidden");
+}
+
+function backToBooking(){
+  paymentBox.classList.add("hidden");
+  historyBox.classList.add("hidden");
+  botBox.classList.add("hidden");
+  bookingBox.classList.remove("hidden");
+}
+
+function logout(){
+  location.reload();
+}
+</script>
+
+</body>
+</html>

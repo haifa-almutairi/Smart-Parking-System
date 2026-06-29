@@ -1,0 +1,214 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <HTTPClient.h>
+
+const char* ssid = "joud_iphone";
+const char* password = "joudjoud";
+
+const String firebaseURL = "https://parking-systemjh-default-rtdb.firebaseio.com/slots";
+
+WebServer server(80);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+const int trigPins[8] = {4, 5, 18, 19, 12, 15, 23, 27};
+const int echoPins[8] = {32, 33, 25, 26, 14, 13, 16, 17};
+
+bool parkingStatus[8] = {false};
+bool lastStatus[8] = {true, true, true, true, true, true, true, true};
+
+const int distanceThreshold = 15;
+
+const char INDEX_HTML[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Smart Parking</title>
+</head>
+<body style="font-family: Arial; text-align: center;">
+  <h1>Smart Parking</h1>
+  <div id="slots"></div>
+  <h2>Available: <span id="count">0</span> / 8</h2>
+
+  <script>
+    function updateParkingData() {
+      fetch('/data')
+        .then(response => response.json())
+        .then(data => {
+          let html = "";
+          let available = 0;
+
+          data.forEach((slotStatus, index) => {
+            if (!slotStatus) {
+              available++;
+            }
+
+            html += "Slot " + (index + 1) + " : " + 
+                    (slotStatus ? "Occupied" : "Available") + "<br>";
+          });
+
+          document.getElementById("slots").innerHTML = html;
+          document.getElementById("count").innerText = available;
+        });
+    }
+
+    setInterval(updateParkingData, 500);
+    updateParkingData();
+  </script>
+</body>
+</html>
+)rawliteral";
+
+long getDistance(int trigPin, int echoPin) {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  long duration = pulseIn(echoPin, HIGH, 25000);
+
+  if (duration == 0) {
+    return 999;
+  }
+
+  return duration * 0.034 / 2;
+}
+
+void sendToFirebase(int slotNumber, String status) {
+  if (WiFi.status() != WL_CONNECTED) {
+    return;
+  }
+
+  HTTPClient http;
+  String url = firebaseURL + "/slot" + String(slotNumber) + ".json";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  String data = "\"" + status + "\"";
+  int responseCode = http.PUT(data);
+
+  Serial.print("Slot ");
+  Serial.print(slotNumber);
+  Serial.print(" -> ");
+  Serial.println(responseCode);
+
+  http.end();
+}
+
+void setupSensors() {
+  for (int i = 0; i < 8; i++) {
+    pinMode(trigPins[i], OUTPUT);
+    pinMode(echoPins[i], INPUT);
+  }
+}
+
+void setupLCD() {
+  lcd.init();
+  lcd.backlight();
+
+  lcd.print("SMART PARKING");
+  delay(1500);
+  lcd.clear();
+}
+
+void setupWiFi() {
+  Serial.print("Connecting");
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nConnected!");
+  Serial.println(WiFi.localIP());
+}
+
+void setupWebServer() {
+  server.on("/", []() {
+    server.send(200, "text/html", INDEX_HTML);
+  });
+
+  server.on("/data", []() {
+    String json = "[";
+
+    for (int i = 0; i < 8; i++) {
+      json += String(parkingStatus[i]);
+
+      if (i < 7) {
+        json += ",";
+      }
+    }
+
+    json += "]";
+    server.send(200, "application/json", json);
+  });
+
+  server.begin();
+}
+
+void updateLCD(int availableCount) {
+  lcd.setCursor(0, 0);
+  lcd.print("Available:");
+  lcd.print(availableCount);
+  lcd.print("/8  ");
+
+  lcd.setCursor(0, 1);
+
+  if (availableCount == 0) {
+    lcd.print("FULL        ");
+  } else if (availableCount <= 2) {
+    lcd.print("Almost Full ");
+  } else {
+    lcd.print("Welcome     ");
+  }
+}
+
+void updateParkingStatus() {
+  int availableCount = 0;
+
+  for (int i = 0; i < 8; i++) {
+    long distance = getDistance(trigPins[i], echoPins[i]);
+
+    parkingStatus[i] = (distance > 2 && distance < distanceThreshold);
+
+    if (parkingStatus[i] != lastStatus[i]) {
+      String status = parkingStatus[i] ? "Occupied" : "Available";
+      sendToFirebase(i + 1, status);
+      lastStatus[i] = parkingStatus[i];
+      delay(100);
+    }
+
+    if (!parkingStatus[i]) {
+      availableCount++;
+    }
+  }
+
+  updateLCD(availableCount);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  setupWiFi();
+  setupSensors();
+  setupLCD();
+  setupWebServer();
+}
+
+void loop() {
+  server.handleClient();
+
+  static unsigned long lastMeasureTime = 0;
+
+  if (millis() - lastMeasureTime > 1000) {
+    updateParkingStatus();
+    lastMeasureTime = millis();
+  }
+}
